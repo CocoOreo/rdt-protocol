@@ -1,0 +1,3 @@
+#!/bin/bash
+
+python3 network_emulator.py 9991 localhost 9994 9993 localhost 9992 1 0.2 0
