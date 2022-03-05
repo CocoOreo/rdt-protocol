@@ -12,7 +12,7 @@ MAX_PACKET_SIZE = 500
 # Global variables
 lock = threading.Lock()
 sendBase = 0
-nextSeqnum = 0
+nextPacketId = 0
 windowSize = 1
 done = False
 timerList = []
@@ -20,6 +20,7 @@ timeout = 0.100
 timestamp = 0
 retransList = []
 ackList = []
+packetLen = 0
 
 # Classes
 
@@ -45,10 +46,11 @@ NLog = []
 
 
 def transmission(packets, emulatorAddr, emulatorPort, client_udp_sock):
-    global nextSeqnum
+    global nextPacketId
     global windowSize
     global timestamp
     global timerList
+    global retransList
 
     recvThread = threading.Thread(target=recvSACK, args=(client_udp_sock,))
     recvThread.start()
@@ -63,8 +65,9 @@ def transmission(packets, emulatorAddr, emulatorPort, client_udp_sock):
                 windowSize = 1
                 del timerList[index]
                 # Sendbase Packet timeout
-                if index == sendBase:
-                    print("Sendbase Retrans", sendBase)
+                if seqnum == sendBase % 32:
+                    print("Sendbase Retrans", sendBase %
+                          32, "current _id", _id)
                     client_udp_sock.sendto(
                         packets[_id].encode(), (emulatorAddr, emulatorPort))
                     NLog.append("t=" + str(timestamp) + ' ' + str(windowSize))
@@ -73,42 +76,56 @@ def transmission(packets, emulatorAddr, emulatorPort, client_udp_sock):
                     timestamp += 1
                     break
                 else:
-                    retransList.append(packets[_id])
+                    retransList.append((packets[_id], _id))
                     NLog.append("t=" + str(timestamp) + ' ' + str(windowSize))
                     timestamp += 1
                     break
-        lock.release()
+        # lock.release()
 
+        # process retran
+        # lock.acquire()
         if len(retransList) > 0:
+            deleteTargets = []
             for index in range(len(retransList)):
-                cur = retransList[index]
-                if cur.seqnum > sendBase + windowSize:
-                    break
+                # item in retransList: (packert, _id)
+                cur = retransList[index][0]
+                if cur.seqnum > (sendBase % 32) + windowSize:
+                    continue
                 else:
-                    lock.acquire()
-                    print("Normal Retrans", _id)
+                    print("Normal Retrans", retransList[index][1])
                     client_udp_sock.sendto(
-                        retransList[index].encode(), (emulatorAddr, emulatorPort))
+                        cur.encode(), (emulatorAddr, emulatorPort))
                     seqnumLog.append("t=" + str(timestamp) +
-                                     ' ' + str(sendBase))
-                    timerList.append(PacketTimer(_id))
+                                     ' ' + str(cur.seqnum))
+                    timerList.append(PacketTimer(retransList[index][1]))
                     timestamp += 1
-                    del retransList[index]
-                    lock.release()
+                    deleteTargets.append(retransList[index])
+                    # del retransList[index]
+            for target in deleteTargets:
+                retransList.remove(target)
+        # lock.release()
+
         # if window is not full, send segments
-        if nextSeqnum < min(sendBase + windowSize, len(packets)):
+        if nextPacketId <= min(sendBase + windowSize - 1, len(packets) - 1):
+            # lock.acquire()
             client_udp_sock.sendto(
-                packets[nextSeqnum].encode(), (emulatorAddr, emulatorPort))
-            lock.acquire()
-            timerList.append(PacketTimer(nextSeqnum))
-            seqnumLog.append(packets[nextSeqnum].seqnum)
-            nextSeqnum += 1
+                packets[nextPacketId].encode(), (emulatorAddr, emulatorPort))
+            # EOT Packet: Never discard
+            if(nextPacketId == len(packets) - 1):
+                seqnumLog.append("t=" + str(timestamp) + ' ' +
+                                 'EOT')
+            # Data Packet: May be discarded, add a timer
+            else:
+                timerList.append(PacketTimer(nextPacketId))
+                seqnumLog.append("t=" + str(timestamp) + ' ' +
+                                 str(packets[nextPacketId].seqnum))
+            nextPacketId += 1
             timestamp += 1
-            lock.release()
+            # lock.release()
+        lock.release()
 
 
 def recvSACK(client_udp_sock):
-    print("recv")
     global sendBase
     global done
     global windowSize
@@ -116,6 +133,7 @@ def recvSACK(client_udp_sock):
     global timerList
 
     while not done:
+        # lock.acquire()
         msg, _ = client_udp_sock.recvfrom(4096)
         sack_packet = Packet(msg)
         sack_seqnum = sack_packet.seqnum
@@ -132,7 +150,8 @@ def recvSACK(client_udp_sock):
         # New ack
         if sack_seqnum not in ackList:
             lock.acquire()
-            windowSize += 1
+            if windowSize < 10:
+                windowSize += 1
             NLog.append("t=" + str(timestamp) + ' ' + str(windowSize))
             ackLog.append("t=" + str(timestamp) + ' ' + str(sack_seqnum))
             ackList.append(sack_seqnum)
@@ -141,12 +160,16 @@ def recvSACK(client_udp_sock):
                     del timerList[index]
                     break
 
-            if(sack_seqnum == sendBase):
-                while sendBase in ackList:
-                    ackList.remove(sendBase)
-                    sendBase += 1
+            # Send
+            if(sack_seqnum == sendBase % 32):
+                while (sendBase % 32) in ackList:
+                    print("Send Base:", sendBase)
+                    ackList.remove(sendBase % 32)
+                    sendBase = min(sendBase + 1, packetLen -1)
+                    print("Send Base + 1:", sendBase)
             timestamp += 1
             lock.release()
+        # lock.release()
 
 
 def fileToPacket(filename):
@@ -160,9 +183,9 @@ def fileToPacket(filename):
         data = file[i *
                     MAX_PACKET_SIZE:min((i + 1) * MAX_PACKET_SIZE, len(file))]
         # type seqnum lenth data (0:sack, 1: data, 2:eot)
-        packets.append(Packet(1, i, len(str(data)), str(data)))
+        packets.append(Packet(1, i % 32, len(str(data)), str(data)))
     # last packet is the EOT packet
-    packets.append(Packet(2, NUM_OF_PACKETS, 0, ''))
+    packets.append(Packet(2, (NUM_OF_PACKETS - 1) % 32, 0, ''))
     return packets
 
 
@@ -188,12 +211,13 @@ def writeLogFile():
 
 def main():
     global timeout
+    global timestamp
+    global packetLen
 
     if len(sys.argv) != 6:
         print("Improper number of arguments")
         exit(1)
 
-    print(sys.argv)
     emulatorAddr = sys.argv[1]
     emulatorPort = int(sys.argv[2])
     sackPort = int(sys.argv[3])
@@ -201,8 +225,10 @@ def main():
     filename = sys.argv[5]
 
     packets = fileToPacket(filename)
+    packetLen = len(packets)
     # Initialize window size
     NLog.append("t=" + str(timestamp) + ' ' + str(windowSize))
+    timestamp += 1
 
     client_udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client_udp_sock.bind(('', sackPort))
