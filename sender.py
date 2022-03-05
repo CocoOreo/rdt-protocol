@@ -80,10 +80,8 @@ def transmission(packets, emulatorAddr, emulatorPort, client_udp_sock):
                     NLog.append("t=" + str(timestamp) + ' ' + str(windowSize))
                     timestamp += 1
                     break
-        # lock.release()
 
         # process retran
-        # lock.acquire()
         if len(retransList) > 0:
             deleteTargets = []
             for index in range(len(retransList)):
@@ -92,7 +90,8 @@ def transmission(packets, emulatorAddr, emulatorPort, client_udp_sock):
                 if cur.seqnum > (sendBase % 32) + windowSize:
                     continue
                 else:
-                    print("Normal Retrans", retransList[index][1])
+                    print("Normal Retrans",
+                          retransList[index][1], "Send base", sendBase)
                     client_udp_sock.sendto(
                         cur.encode(), (emulatorAddr, emulatorPort))
                     seqnumLog.append("t=" + str(timestamp) +
@@ -154,19 +153,42 @@ def recvSACK(client_udp_sock):
                 windowSize += 1
             NLog.append("t=" + str(timestamp) + ' ' + str(windowSize))
             ackLog.append("t=" + str(timestamp) + ' ' + str(sack_seqnum))
-            ackList.append(sack_seqnum)
+            if sendBase % 32 >= 23:
+                if (sendBase % 32 <= sack_seqnum and sack_seqnum <= 31) or sack_seqnum <= ((sendBase + 9) % 32):
+                    ackList.append(sack_seqnum)
+            else:
+                if sack_seqnum >= sendBase % 32 and sack_seqnum <= (sendBase + 9) % 32:
+                    ackList.append(sack_seqnum)
+            # ackList.append(sack_seqnum)
+            # When receive a new ack, clean the timerlist and the retranslist
+            deleteList = []
             for index in range(len(timerList)):
                 if timerList[index].seqnum == sack_seqnum:
-                    del timerList[index]
-                    break
+                    deleteList.append(timerList[index])
+            for item in deleteList:
+                timerList.remove(item)
+            # deleteList = []
+            # for index in range(len(retransList)):
+            #     # item in retransList: (packet, _id)
+            #     cur = retransList[index][0]
+            #     if(cur.seqnum == sack_seqnum):
+            #         deleteList.append(retransList[index])
+            # for item in deleteList:
+            #     retransList.remove(item)
 
             # Send
             if(sack_seqnum == sendBase % 32):
                 while (sendBase % 32) in ackList:
                     print("Send Base:", sendBase)
                     ackList.remove(sendBase % 32)
-                    sendBase = min(sendBase + 1, packetLen -1)
-                    print("Send Base + 1:", sendBase)
+                    sendBase = min(sendBase + 1, packetLen - 1)
+                    deleteList = []
+                    for index in range(len(timerList)):
+                        if timerList[index]._id < sendBase:
+                            deleteList.append(timerList[index])
+                    for item in deleteList:
+                        timerList.remove(item)
+                print("Send Base + 1:", sendBase)
             timestamp += 1
             lock.release()
         # lock.release()
@@ -186,6 +208,7 @@ def fileToPacket(filename):
         packets.append(Packet(1, i % 32, len(str(data)), str(data)))
     # last packet is the EOT packet
     packets.append(Packet(2, (NUM_OF_PACKETS - 1) % 32, 0, ''))
+    print("PAcket len", len(packets))
     return packets
 
 
