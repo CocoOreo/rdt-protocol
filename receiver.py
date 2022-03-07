@@ -2,12 +2,13 @@ import sys
 import socket
 from packet import Packet
 
+SEQ_MODULO = 32
+
 arrival_log = []
 expected_pkt_num = 0
 packet_buffer = {}
 hasBufferedEOT = False
 EOTSeqnum = -1
-SEQ_MODULO = 32
 done = False
 
 
