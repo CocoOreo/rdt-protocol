@@ -217,7 +217,7 @@ def exportLog():
         file.write(str(log) + "\n")
     file.close()
 
-    # time.log
+    # N.log
     file = open('N.log', 'w+')
     for log in NLog:
         file.write(str(log) + "\n")

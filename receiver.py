@@ -2,102 +2,90 @@ import sys
 import socket
 from packet import Packet
 
-SEQ_MODULO = 32
-
-arrival_log = []
-expected_pkt_num = 0
-packet_buffer = {}
-hasBufferedEOT = False
-EOTSeqnum = -1
+arrivalLog = []
+expectedNum = 0
+packetBuffer = {}
 done = False
 
 
-def receive(file, emulatorAddr, emuReceiveACK, client_udp_sock):
+def receive(file, address, port, receiverSocket):
     global done
     while not done:
-        global expected_pkt_num
-        global packet_buffer
-        global hasBufferedEOT
-        global EOTSeqnum
+        global expectedNum
+        global packetBuffer
 
-        # If we have received the EOT Packet and has already have all data packets, send EOT back
-        if hasBufferedEOT and (expected_pkt_num == EOTSeqnum):
-            EOT = Packet(2, seq_num, 0, '')
-            print("Send EOT Packet")
-            client_udp_sock.sendto(EOT.encode(), (emulatorAddr, emuReceiveACK))
-            done = True
-            break
-
-        msg, _ = client_udp_sock.recvfrom(4096)
-        data_packet = Packet(msg)
-        packet_type = data_packet.typ
-        seq_num = data_packet.seqnum
-        data = data_packet.data
-        if packet_type == 1:
-            arrival_log.append(seq_num)
-        elif packet_type == 2:
-            arrival_log.append('EOT')
-        print("recv seqnum =>", seq_num)
-        print("current expect num", expected_pkt_num)
+        # Get packets from sender
+        res, _ = receiverSocket.recvfrom(4096)
+        receivedPacket = Packet(res)
+        packetType = receivedPacket.typ
+        packetNum = receivedPacket.seqnum
+        data = receivedPacket.data
+        # Log
+        if packetType == 1:
+            arrivalLog.append(packetNum)
+        elif packetType == 2:
+            arrivalLog.append('EOT')
+        print("recv seqnum =>", packetNum)
+        print("current expect num", expectedNum)
 
         # receives EOT, send EOT back and exit
-        if packet_type == 2:
-            hasBufferedEOT = True
-            EOTSeqnum = seq_num
-            print("BUffer EOT", hasBufferedEOT, "SEQ",
-                  EOTSeqnum, "expect", expected_pkt_num)
+        if packetType == 2:
+            EOT = Packet(2, packetNum, 0, '')
+            print("Send EOT Packet")
+            receiverSocket.sendto(EOT.encode(), (address, port))
+            done = True
 
         # receives expected data packet
-        if packet_type == 1:
-            client_udp_sock.sendto(
-                Packet(0, seq_num, 0, '').encode(), (emulatorAddr, emuReceiveACK))
+        if packetType == 1:
+            receiverSocket.sendto(
+                Packet(0, packetNum, 0, '').encode(), (address, port))
             # Buffer packet
-            if expected_pkt_num >= 23:
-                if (expected_pkt_num <= seq_num and seq_num <= 31) or seq_num <= ((expected_pkt_num + 9) % SEQ_MODULO):
-                    packet_buffer[seq_num] = data
+            if expectedNum >= 23:
+                if (expectedNum <= packetNum and packetNum <= 31) or packetNum <= ((expectedNum + 9) % 32):
+                    packetBuffer[packetNum] = data
             else:
-                if seq_num >= expected_pkt_num and seq_num <= expected_pkt_num + 9:
-                    packet_buffer[seq_num] = data
-            # if (seq_num >= expected_pkt_num and seq_num <= expected_pkt_num + 9) or (expected_pkt_num > 22 and seq_num <= ((expected_pkt_num + 9) % SEQ_MODULO)):
-            #     packet_buffer[seq_num] = data
+                if packetNum >= expectedNum and packetNum <= expectedNum + 9:
+                    packetBuffer[packetNum] = data
 
-            while expected_pkt_num in packet_buffer:
-                file.write(packet_buffer[expected_pkt_num].encode())
-                del packet_buffer[expected_pkt_num]
-                expected_pkt_num = (expected_pkt_num + 1) % SEQ_MODULO
-                print("Final Exp", expected_pkt_num, "EOT NUM", EOTSeqnum)
+            while expectedNum in packetBuffer:
+                file.write(packetBuffer[expectedNum].encode())
+                del packetBuffer[expectedNum]
+                expectedNum = (expectedNum + 1) % 32
 
-def writeLogFile():
-    # Writing log file
-    # arrival.log
+
+def exportLog():
     f = open('arrival.log', 'w+')
-    for log in arrival_log:
+    for log in arrivalLog:
         f.write(str(log) + "\n")
     f.close()
 
 
 def main():
+    # Validate arguments
     if len(sys.argv) != 5:
         print("Improper number of arguments")
         exit(1)
 
-    emulatorAddr = sys.argv[1]
-    emuReceiveACK = int(sys.argv[2])
-    rcvrReceiveData = int(sys.argv[3])
+    # Initialize variables
+    address = sys.argv[1]
+    port = int(sys.argv[2])
+    receivePort = int(sys.argv[3])
     filename = sys.argv[4]
+    receiverSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiverSocket.bind(('', receivePort))
 
-    client_udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    client_udp_sock.bind(('', rcvrReceiveData))
-
+    # Log file
     try:
         file = open(filename, 'wb')
     except IOError:
         print('Unable to open', filename)
         return
 
-    receive(file, emulatorAddr, emuReceiveACK, client_udp_sock)
+    # Run receiver
+    receive(file, address, port, receiverSocket)
 
-    writeLogFile()
+    # Export log file
+    exportLog()
 
     file.close()
 
