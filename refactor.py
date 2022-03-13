@@ -39,7 +39,7 @@ class PacketWithTimer:
         self._id = _id
         self.seqnum = _id % 32
         self.hasTimer = False
-        self.timeBase = None
+        self.timerBase = None
         self.packet = packet
         self.lost = False
         self.receivedAck = False
@@ -49,11 +49,11 @@ class PacketWithTimer:
         self.hasTimer = True
 
     def isTimeout(self):
-        res = (time.time() - self.timeBase) > timeout
+        res = (time.time() - self.timerBase) > timeout
         return res
 
     def resetTimer(self):
-        self.timeBase = time.time()
+        self.timerBase = time.time()
 
 
 def send(timerPacket):
@@ -77,49 +77,56 @@ def transmission():
 
     while not done:
         # Step CheckTimerout
-        lock.acquire()
         for index in list(range(basePointer, nextPointer)):
             cur = packets[index]
-            if cur.hasTimer and not cur.receivedAck:
+            if cur.hasTimer and not cur.receivedAck and not cur.lost:
                 if cur.isTimeout():
                     packets[index].lost = True
+                    lock.acquire()
                     windowSize = 1
                     windowBoundary = basePointer
                     # Sendbase packet lost
                     if cur._id == basePointer:
                         send(packets[basePointer])
+                        packets[basePointer].resetTimer()
                         NLog.append("t=" + str(timestamp) +
                                     ' ' + str(windowSize))
                         seqnumLog.append(
                             "t=" + str(timestamp) + ' ' + str(cur.seqnum))
                         timestamp += 1
+                        lock.release()
+                        break
                     # Other packets lost
                     else:
+                        # packets[index].hasTimer = False
                         NLog.append("t=" + str(timestamp) +
                                     ' ' + str(windowSize))
                         timestamp += 1
+                        lock.release()
                         break
-        lock.release()
 
-        for index in list(range(basePointer, windowBoundary + 1)):
+        for index in list(range(basePointer, min(windowBoundary + 1, len(packets)))):
             cur = packets[index]
             if not cur.receivedAck and (cur.lost == True or cur._id == nextPointer):
                 if cur.packet.typ == 2 and basePointer == len(packets) - 1 and not EOTSended:
                     send(cur)
+                    cur.startTimer()
                     seqnumLog.append("t=" + str(timestamp) +
                                      ' ' + 'EOT')
                     EOTSended = True
                     break
-                else:
+                elif cur.packet.typ == 1:
                     send(cur)
                     # When sending a packet that has not been sent before, move nextPointer
                     if(cur.lost == False):
+                        cur.startTimer()
                         nextPointer = nextPointer + 1
-                    cur.resetTimer()
+                    # Retransmission packet
+                    else:
+                        cur.resetTimer()
                     cur.lost = False
                     seqnumLog.append("t=" + str(timestamp) +
                                      ' ' + str(cur.seqnum))
-
                     timestamp += 1
 
 
@@ -142,10 +149,8 @@ def recvSACK(senderSocket):
 
         # Step 2: Check EOT, If received an ack for EOT, then exit.
         if ackType == 2:
-            lock.acquire()
             done = True
             ackLog.append("t=" + str(timestamp) + ' ' + 'EOT')
-            lock.release()
             break
         else:
             # Recore this ack seqnum even though it's an old ack
@@ -153,28 +158,73 @@ def recvSACK(senderSocket):
 
             # Step3: Check whether this ack is a new ack, this ack should in a reasonable range
             # Then process it.
-            if packets[math.floor(basePointer / 32) * 32 + ackSeqnum].receivedAck == False:
-                if basePointer % 32 >= 23:
-                    if (basePointer % 32 <= ackSeqnum and ackSeqnum <= 31) or ackSeqnum <= ((basePointer + MAX_WINDOW_SIZE - 1) % 32):
-                        cur = packets[math.floor(
-                            basePointer / 32) * 32 + ackSeqnum]
-                else:
-                    if ackSeqnum >= basePointer % 32 and ackSeqnum <= (basePointer + MAX_WINDOW_SIZE - 1) % 32:
-                        cur = packets[math.floor(
-                            basePointer / 32) * 32 + ackSeqnum]
-                cur.receivedAck = True
-                if windowSize < 10:
-                    windowSize += 1
-                NLog.append("t=" + str(timestamp) +
+
+            # Situation 1 : basePointer >= 23
+            if basePointer % 32 >= 23:
+                baseSeq = basePointer % 32
+                if ackSeqnum >= baseSeq and packets[math.floor(basePointer / 32) * 32 + ackSeqnum].receivedAck == False:
+                    cur = packets[math.floor(
+                        basePointer / 32) * 32 + ackSeqnum]
+                    cur.receivedAck = True
+                    if windowSize < 10:
+                        lock.acquire()
+                        windowSize += 1
+                        lock.release()
+                    NLog.append("t=" + str(timestamp) +
                                 ' ' + str(windowSize))
-                windowBoundary = basePointer + windowSize - 1
+                    windowBoundary = basePointer + windowSize - 1
+                    timestamp += 1
+                elif ackSeqnum <= (baseSeq + MAX_WINDOW_SIZE - 1) % 32 and packets[(math.floor(basePointer / 32) + 1) * 32 + ackSeqnum].receivedAck == False:
+                    cur = packets[(math.floor(
+                        basePointer / 32) + 1) * 32 + ackSeqnum]
+                    cur.receivedAck = True
+                    if windowSize < 10:
+                        lock.acquire()
+                        windowSize += 1
+                        lock.release()
+                    NLog.append("t=" + str(timestamp) +
+                                ' ' + str(windowSize))
+                    windowBoundary = basePointer + windowSize - 1
+                    timestamp += 1
+
+            # Situation 2 : basePointer < 23
+            else:
+                baseSeq = basePointer % 32
+
+                if ackSeqnum >= (baseSeq + MAX_WINDOW_SIZE - 1) and packets[((math.floor(basePointer / 32) - 1) * 32) + ackSeqnum].receivedAck == False:
+                    cur = packets[(math.floor(
+                        basePointer / 32 - 1)) * 32 + ackSeqnum]
+                    cur.receivedAck = True
+                    if windowSize < 10:
+                        lock.acquire()
+                        windowSize += 1
+                        lock.release()
+                    NLog.append("t=" + str(timestamp) +
+                                ' ' + str(windowSize))
+                    windowBoundary = basePointer + windowSize - 1
+                    timestamp += 1
+                elif ackSeqnum <= baseSeq and packets[math.floor(basePointer / 32) * 32 + ackSeqnum].receivedAck == False:
+                    cur = packets[math.floor(
+                        basePointer / 32) * 32 + ackSeqnum]
+                    cur.receivedAck = True
+                    if windowSize < 10:
+                        lock.acquire()
+                        windowSize += 1
+                        lock.release()
+                    NLog.append("t=" + str(timestamp) +
+                                ' ' + str(windowSize))
+                    windowBoundary = basePointer + windowSize - 1
+                    timestamp += 1
 
             # Step 4: Move basePointer
+            lock.acquire()
             while packets[basePointer].receivedAck == True:
                 basePointer += 1
                 windowBoundary = min(
-                    basePointer + windowSize - 1, len(packets) - 1)
-            timestamp += 1
+                    basePointer + windowSize - 1, len(packets))
+                if basePointer == len(packets):
+                    windowBoundary = len(packets)
+            lock.release()
 
 
 def convertPacket(filename):
